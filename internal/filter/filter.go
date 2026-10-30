@@ -11,7 +11,11 @@
 //	         | field "MATCHES*" value          (regexp, case-insensitive)
 //	         | field "NOT" "MATCHES"  value
 //	         | field "NOT" "MATCHES*" value
-//	         | field ">" duration              (relative time: 10m, 1h, 2d)
+//	         | timefield op duration           (log_time > 10m: stamped after 10 minutes ago)
+//
+// Relative times compile to SQLite's own clock (strftime 'now'), so the
+// cutoff moves with every query the fragment is used in; nothing is frozen at
+// parse time. Durations are 10s, 10m, 2h, 1d.
 //
 //	field    = identifier | "data." identifier
 //	op       = "=" | "!=" | "<" | ">" | "<=" | ">="
@@ -378,12 +382,10 @@ func (p *parser) parseTerm() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// Relative time: field > 10m  →  field > cutoff (passed as arg)
-		if isTimeField(field) && (op == ">" || op == "<") {
+		// log_time > 10m: the timestamp is after ten minutes ago.
+		if isTimeField(field) && isOrderOp(op) {
 			if dur, ok := parseDuration(fmt.Sprint(v)); ok {
-				cutoff := time.Now().Add(-dur).UTC().Format(time.RFC3339Nano)
-				return fmt.Sprintf("COALESCE(%s, ingested_at) %s %s",
-					toSQL(field), op, p.arg(cutoff)), nil
+				return relativeTimeSQL(field, op, dur), nil
 			}
 		}
 		return fmt.Sprintf("%s %s %s", toSQL(field), op, p.arg(v)), nil
@@ -428,6 +430,19 @@ func toSQL(field string) string {
 
 func isTimeField(field string) bool {
 	return field == "log_time" || field == "ingested_at"
+}
+
+func isOrderOp(op string) bool {
+	return op == "<" || op == "<=" || op == ">" || op == ">="
+}
+
+// relativeTimeSQL compares a time column with a cutoff that SQLite computes
+// from its own clock at query time, in the same '%Y-%m-%dT%H:%M:%fZ' shape the
+// columns are stored in, so the comparison is a plain string compare. A row
+// without a log_time falls back to ingested_at.
+func relativeTimeSQL(field, op string, dur time.Duration) string {
+	return fmt.Sprintf("COALESCE(%s, ingested_at) %s strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', 'now', '-%g seconds')",
+		toSQL(field), op, dur.Seconds())
 }
 
 func parseDuration(s string) (time.Duration, bool) {

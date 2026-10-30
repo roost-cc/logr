@@ -159,35 +159,45 @@ func TestJSONBField_matches(t *testing.T) {
 
 // --- Relative time ---
 
+// The cutoff is computed by SQLite at query time, never frozen at parse time,
+// so the fragment carries no argument and names SQLite's clock.
 func TestRelativeTime_minutes(t *testing.T) {
 	r := mustParse(t, "log_time > 10m")
-	// SQLite mode: cutoff is passed as an arg, not computed in SQL
-	if len(r.Args) != 1 {
-		t.Errorf("expected 1 arg (cutoff string), got %d", len(r.Args))
+	if len(r.Args) != 0 {
+		t.Errorf("expected no args, got %v", r.Args)
 	}
-	if !strings.Contains(r.SQL, "?") {
-		t.Errorf("SQL should have ? placeholder: %s", r.SQL)
+	want := "COALESCE(log_time, ingested_at) > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-600 seconds')"
+	if r.SQL != want {
+		t.Errorf("SQL = %s\nwant %s", r.SQL, want)
 	}
 }
 
 func TestRelativeTime_hours(t *testing.T) {
 	r := mustParse(t, "log_time > 2h")
-	if len(r.Args) != 1 {
-		t.Errorf("expected 1 arg (cutoff string), got %d", len(r.Args))
+	if !strings.Contains(r.SQL, "'-7200 seconds'") {
+		t.Errorf("SQL should subtract 7200 seconds: %s", r.SQL)
 	}
 }
 
 func TestRelativeTime_days(t *testing.T) {
 	r := mustParse(t, "log_time > 1d")
-	if len(r.Args) != 1 {
-		t.Errorf("expected 1 arg (cutoff string), got %d", len(r.Args))
+	if !strings.Contains(r.SQL, "'-86400 seconds'") {
+		t.Errorf("SQL should subtract 86400 seconds: %s", r.SQL)
 	}
 }
 
-func TestRelativeTime_fallbackToIngestedAt(t *testing.T) {
-	r := mustParse(t, "log_time > 1h")
-	if !strings.Contains(r.SQL, "ingested_at") {
-		t.Errorf("SQL should fall back to ingested_at: %s", r.SQL)
+func TestRelativeTime_olderThan(t *testing.T) {
+	r := mustParse(t, "log_time <= 1d")
+	if !strings.Contains(r.SQL, "ingested_at) <= strftime") {
+		t.Errorf("SQL should keep the <= operator: %s", r.SQL)
+	}
+}
+
+func TestRelativeTime_ingestedAt(t *testing.T) {
+	r := mustParse(t, "ingested_at > 30s")
+	want := "COALESCE(ingested_at, ingested_at) > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 seconds')"
+	if r.SQL != want {
+		t.Errorf("SQL = %s\nwant %s", r.SQL, want)
 	}
 }
 
