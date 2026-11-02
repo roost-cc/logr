@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "project": { "name": "logr" },
+  "languages": ["go"],
+  "use_toolchains": ["go:standard"],
+  "targets": { "local": {} },
+  "platforms": ["linux/amd64"],
+  "actions": {
+    "test": {
+      "required_tools": ["go"],
+      "commands": ["go test ./..."]
+    }
+  },
+  "vulns": {}
+}
