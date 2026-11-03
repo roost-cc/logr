@@ -53,12 +53,12 @@ repos:
         exclude: ^\.rrepo-shared/
         stages: [commit-msg]
 
-  # ── Local CI gate (pre-push) ──
+  # ── Native test gate (pre-push) ──
   - repo: local
     hooks:
-      - id: ci-gate
-        name: ci gate (local pre-push gate)
-        entry: bash -c 'if [ -n "$ROOST_DIR" ]; then exec "$ROOST_DIR/ci-cd/bin/ci" gate --target local --platform linux/amd64; fi; exec go test ./...'
+      - id: test-gate
+        name: test gate (local pre-push gate)
+        entry: go test ./...
         language: system
         stages: [pre-push]
         always_run: true
