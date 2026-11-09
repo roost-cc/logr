@@ -107,7 +107,7 @@ Config keys (server.toml):
 	}
 	defer sqlDB.Close()
 
-	log.Printf("server: applying schema, building indexes if missing (minutes on a large database)")
+	log.Printf("server: applying schema")
 	if err := db.Migrate(ctx, sqlDB); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
