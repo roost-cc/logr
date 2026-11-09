@@ -256,7 +256,7 @@ func runRetention(ctx context.Context, sqlDB *sql.DB, retention time.Duration) {
 	purge := func() {
 		n, err := db.Purge(ctx, sqlDB, retention)
 		if err != nil && ctx.Err() == nil {
-			log.Printf("retention: %v", err)
+			log.Printf("retention: purged %d rows, then: %v", n, err)
 		} else if n > 0 {
 			log.Printf("retention: purged %d rows older than %v", n, retention)
 		}
