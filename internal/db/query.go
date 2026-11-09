@@ -152,9 +152,20 @@ func Purge(ctx context.Context, db *sql.DB, olderThan time.Duration) (int64, err
 	return res.RowsAffected()
 }
 
-// Sources returns the distinct sources present in the logs table.
+// sourcesSQL lists the distinct sources with a loose index scan: it seeks
+// logs_source_idx once per source (min, then min greater than the previous),
+// instead of reading every entry as SELECT DISTINCT does. The rows come out
+// in index order, so they are sorted.
+const sourcesSQL = `WITH RECURSIVE s(source) AS (
+	SELECT min(source) FROM logs
+	UNION ALL
+	SELECT (SELECT min(source) FROM logs WHERE source > s.source) FROM s WHERE s.source IS NOT NULL
+)
+SELECT source FROM s WHERE source IS NOT NULL`
+
+// Sources returns the distinct sources present in the logs table, sorted.
 func Sources(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT source FROM logs ORDER BY source`)
+	rows, err := db.QueryContext(ctx, sourcesSQL)
 	if err != nil {
 		return nil, err
 	}
