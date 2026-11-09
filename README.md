@@ -417,10 +417,10 @@ CREATE TABLE logs (
     data        TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX logs_log_time_idx    ON logs (log_time DESC);
-CREATE INDEX logs_ingested_at_idx ON logs (ingested_at DESC);
-CREATE INDEX logs_source_idx      ON logs (source);
-CREATE INDEX logs_level_idx       ON logs (level);
+CREATE INDEX logs_log_time_idx     ON logs (log_time DESC);
+CREATE INDEX logs_ingested_at_idx  ON logs (ingested_at DESC);
+CREATE INDEX logs_source_idx       ON logs (source);
+CREATE INDEX logs_level_idx        ON logs (level);
 CREATE INDEX logs_time_idx         ON logs (COALESCE(log_time, ingested_at));
 CREATE INDEX logs_source_level_idx ON logs (source, level);
 ```
