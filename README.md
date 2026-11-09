@@ -156,6 +156,8 @@ Running `bin/logr-server` directly in a terminal still works for debugging.
 | `-init`    | Write a default `server.toml` and exit |
 | `-migrate` | Apply the database schema and exit     |
 
+After an upgrade that adds indexes, stop the service, run `logr-server -migrate`, then start the service. On a full database the index build can take minutes, and `logr-server` opens its sockets only after it.
+
 ## Running `logr-in` (the forwarder)
 
 `logr-in` runs one connector per process. The connector type and its arguments are read from a config file; CLI flags override individual fields.

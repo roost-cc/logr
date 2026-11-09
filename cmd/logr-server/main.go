@@ -51,7 +51,9 @@ Flags:
                    $XDG_CONFIG_HOME/logr/<name>.toml
                    (default: ~/.config/logr/server.toml)
   -init            Write a default server.toml and exit
-  -migrate         Apply the database schema and exit
+  -migrate         Apply the database schema and exit. It builds missing
+                   indexes, which can take minutes on a large database;
+                   run it before the first start after an upgrade
 
 Config keys (server.toml):
   db            = path to SQLite database file
@@ -105,6 +107,7 @@ Config keys (server.toml):
 	}
 	defer sqlDB.Close()
 
+	log.Printf("server: applying schema, building indexes if missing (minutes on a large database)")
 	if err := db.Migrate(ctx, sqlDB); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
