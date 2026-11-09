@@ -385,9 +385,15 @@ type purgeResult struct {
 	err error
 }
 
+// purgeWindow is how many old rows the Purge tests insert. With purgeBatch 1,
+// Purge runs long enough that the test acts between two batches, also when
+// the scheduler is slow (one CPU, or the race detector).
+const purgeWindow = 20000
+
 // startPurge sets purgeBatch to 1, starts Purge in a goroutine and waits,
 // through the read pool, until the first batch has committed. The database
-// holds old old rows.
+// holds old old rows. When Purge returns, the goroutine sets purgeBatch back,
+// so a later Purge in the test deletes in full batches.
 func startPurge(t *testing.T, ctx context.Context, write, read *sql.DB, old int) <-chan purgeResult {
 	t.Helper()
 	saved := purgeBatch
@@ -397,12 +403,10 @@ func startPurge(t *testing.T, ctx context.Context, write, read *sql.DB, old int)
 	go func() {
 		defer close(finished)
 		n, err := Purge(ctx, write, time.Hour)
+		purgeBatch = saved
 		done <- purgeResult{n, err}
 	}()
-	t.Cleanup(func() {
-		<-finished
-		purgeBatch = saved
-	})
+	t.Cleanup(func() { <-finished })
 	deadline := time.Now().Add(10 * time.Second)
 	for countRows(t, read, "old") == old {
 		if time.Now().After(deadline) {
@@ -416,14 +420,17 @@ func startPurge(t *testing.T, ctx context.Context, write, read *sql.DB, old int)
 // TestPurge_flushBetweenBatches checks D5: while Purge runs, an ingest flush
 // on the same write connection commits between two batches, before Purge
 // returns. If Purge held the connection for the whole delete, the flush would
-// wait for it.
+// wait for it. Then the test cancels Purge, so that it does not wait for every
+// batch, and a second Purge deletes the rest.
 func TestPurge_flushBetweenBatches(t *testing.T) {
 	write, read := openTestPools(t)
-	ctx := context.Background()
-	const old = 1000
+	const old = purgeWindow
 	insertRows(t, write, old, "2026-01-01T00:00:00.000Z", "old")
-	done := startPurge(t, ctx, write, read, old)
+	purgeCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := startPurge(t, purgeCtx, write, read, old)
 
+	ctx := context.Background()
 	ins := NewInserter(write)
 	if err := ins.Add(ctx, Record{Source: "api", Message: "new"}); err != nil {
 		t.Fatalf("Add: %v", err)
@@ -440,9 +447,10 @@ func TestPurge_flushBetweenBatches(t *testing.T) {
 		t.Errorf("flushed rows = %d during Purge, want 1", got)
 	}
 
-	r := <-done
-	if r.err != nil || r.n != old {
-		t.Errorf("Purge = (%d, %v), want (%d, nil)", r.n, r.err, old)
+	cancel()
+	<-done
+	if _, err := Purge(ctx, write, time.Hour); err != nil {
+		t.Fatalf("second Purge: %v", err)
 	}
 	if o, n := countRows(t, read, "old"), countRows(t, read, "new"); o != 0 || n != 1 {
 		t.Errorf("after Purge: %d old, %d new rows; want 0 old, 1 new", o, n)
@@ -456,10 +464,11 @@ func TestPurge_flushBetweenBatches(t *testing.T) {
 // deleted.
 func TestPurge_cancelBetweenBatches(t *testing.T) {
 	write, read := openTestPools(t)
-	const old, keep = 1000, 5
+	const old, keep = purgeWindow, 5
 	insertRows(t, write, old, "2026-01-01T00:00:00.000Z", "old")
 	insertRows(t, write, keep, "", "new")
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := startPurge(t, ctx, write, read, old)
 
 	cancel()
@@ -467,10 +476,10 @@ func TestPurge_cancelBetweenBatches(t *testing.T) {
 	if r.err == nil {
 		t.Fatalf("cancelled Purge = (%d, nil), want an error", r.n)
 	}
-	if r.n < 1 || r.n >= old {
-		t.Errorf("cancelled Purge deleted %d rows, want between 1 and %d", r.n, old-1)
-	}
 	left := countRows(t, read, "old")
+	if deleted := old - left; deleted < 1 || deleted >= old {
+		t.Errorf("cancelled Purge deleted %d rows, want between 1 and %d", deleted, old-1)
+	}
 	if deleted := old - left; deleted != int(r.n) && deleted != int(r.n)+1 {
 		t.Errorf("after cancel: %d old rows deleted, Purge counted %d; want %d or %d", deleted, r.n, r.n, r.n+1)
 	}
