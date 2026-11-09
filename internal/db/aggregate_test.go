@@ -11,7 +11,8 @@ import (
 )
 
 // TestStats_plans checks that every stats query with no filter reads logs
-// only through a covering index and groups with no temporary B-tree (F-100 D3).
+// only through a covering index, and groups and sorts with no temporary B-tree
+// (F-100 D3).
 func TestStats_plans(t *testing.T) {
 	sqlDB := openTestDB(t)
 	for name, q := range map[string]string{
@@ -26,8 +27,8 @@ func TestStats_plans(t *testing.T) {
 				t.Errorf("%s: plan reads logs with no covering index:\n%s", name, plan)
 			}
 		}
-		if strings.Contains(plan, "USE TEMP B-TREE FOR GROUP BY") {
-			t.Errorf("%s: plan groups in a temporary B-tree:\n%s", name, plan)
+		if strings.Contains(plan, "USE TEMP B-TREE") {
+			t.Errorf("%s: plan groups or sorts in a temporary B-tree:\n%s", name, plan)
 		}
 	}
 }
