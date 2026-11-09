@@ -163,6 +163,8 @@ const purgeSQL = `DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE ingest
 // Purge deletes logs older than the given duration, purgeBatch rows per
 // transaction, and returns how many it deleted. Between batches the write
 // connection is free, so an ingest flush does not wait for the whole delete.
+// After an error the count can miss the last batch: a cancel can come after
+// that batch commits.
 func Purge(ctx context.Context, db *sql.DB, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan).UTC().Format(time.RFC3339Nano)
 	var total int64

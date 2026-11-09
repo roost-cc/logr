@@ -255,6 +255,23 @@ func TestQuery_tailSourcePlan(t *testing.T) {
 	}
 }
 
+// preF100DDL is the schema before F-100: it has no logs_time_idx and no
+// logs_source_level_idx.
+const preF100DDL = `
+	CREATE TABLE logs (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		ingested_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+		log_time    TEXT,
+		source      TEXT    NOT NULL,
+		level       TEXT,
+		message     TEXT    NOT NULL,
+		data        TEXT    NOT NULL DEFAULT '{}'
+	);
+	CREATE INDEX logs_log_time_idx    ON logs (log_time DESC);
+	CREATE INDEX logs_ingested_at_idx ON logs (ingested_at DESC);
+	CREATE INDEX logs_source_idx      ON logs (source);
+	CREATE INDEX logs_level_idx       ON logs (level);`
+
 // TestMigrate_existingDB checks that Migrate adds the new indexes to a
 // database made by the schema before F-100, and keeps its rows.
 func TestMigrate_existingDB(t *testing.T) {
@@ -264,20 +281,7 @@ func TestMigrate_existingDB(t *testing.T) {
 	}
 	defer sqlDB.Close()
 	ctx := context.Background()
-	if _, err := sqlDB.ExecContext(ctx, `
-		CREATE TABLE logs (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			ingested_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-			log_time    TEXT,
-			source      TEXT    NOT NULL,
-			level       TEXT,
-			message     TEXT    NOT NULL,
-			data        TEXT    NOT NULL DEFAULT '{}'
-		);
-		CREATE INDEX logs_log_time_idx    ON logs (log_time DESC);
-		CREATE INDEX logs_ingested_at_idx ON logs (ingested_at DESC);
-		CREATE INDEX logs_source_idx      ON logs (source);
-		CREATE INDEX logs_level_idx       ON logs (level);
+	if _, err := sqlDB.ExecContext(ctx, preF100DDL+`
 		INSERT INTO logs (source, level, message) VALUES ('api', 'info', 'm'), ('web', NULL, 'm');`); err != nil {
 		t.Fatalf("old schema: %v", err)
 	}
@@ -346,6 +350,185 @@ func TestPurge_batches(t *testing.T) {
 	}
 	if total, err := TotalCount(ctx, sqlDB, AggOpts{}); err != nil || total != 2 || kept != 2 {
 		t.Errorf("after Purge: %d rows (%d new), %v; want 2 new rows", total, kept, err)
+	}
+}
+
+// insertRows inserts n rows with the given ingested_at ("" for now) and
+// message, in one statement.
+func insertRows(t *testing.T, sqlDB *sql.DB, n int, ingestedAt, message string) {
+	t.Helper()
+	if ingestedAt == "" {
+		ingestedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if _, err := sqlDB.ExecContext(context.Background(), `
+		WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < ?)
+		INSERT INTO logs (ingested_at, source, message) SELECT ?, 'api', ? FROM c`,
+		n, ingestedAt, message); err != nil {
+		t.Fatalf("insert %s: %v", message, err)
+	}
+}
+
+// countRows returns how many rows have the message, read through pool.
+func countRows(t *testing.T, pool *sql.DB, message string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM logs WHERE message = ?`, message).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", message, err)
+	}
+	return n
+}
+
+// purgeResult is what a Purge that runs in a goroutine returns.
+type purgeResult struct {
+	n   int64
+	err error
+}
+
+// startPurge sets purgeBatch to 1, starts Purge in a goroutine and waits,
+// through the read pool, until the first batch has committed. The database
+// holds old old rows.
+func startPurge(t *testing.T, ctx context.Context, write, read *sql.DB, old int) <-chan purgeResult {
+	t.Helper()
+	saved := purgeBatch
+	purgeBatch = 1
+	done := make(chan purgeResult, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		n, err := Purge(ctx, write, time.Hour)
+		done <- purgeResult{n, err}
+	}()
+	t.Cleanup(func() {
+		<-finished
+		purgeBatch = saved
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for countRows(t, read, "old") == old {
+		if time.Now().After(deadline) {
+			t.Fatal("the first purge batch did not commit")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return done
+}
+
+// TestPurge_flushBetweenBatches checks D5: while Purge runs, an ingest flush
+// on the same write connection commits between two batches, before Purge
+// returns. If Purge held the connection for the whole delete, the flush would
+// wait for it.
+func TestPurge_flushBetweenBatches(t *testing.T) {
+	write, read := openTestPools(t)
+	ctx := context.Background()
+	const old = 1000
+	insertRows(t, write, old, "2026-01-01T00:00:00.000Z", "old")
+	done := startPurge(t, ctx, write, read, old)
+
+	ins := NewInserter(write)
+	if err := ins.Add(ctx, Record{Source: "api", Message: "new"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := ins.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	select {
+	case r := <-done:
+		t.Fatalf("Purge returned (%d, %v) before the flush committed", r.n, r.err)
+	default:
+	}
+	if got := countRows(t, read, "new"); got != 1 {
+		t.Errorf("flushed rows = %d during Purge, want 1", got)
+	}
+
+	r := <-done
+	if r.err != nil || r.n != old {
+		t.Errorf("Purge = (%d, %v), want (%d, nil)", r.n, r.err, old)
+	}
+	if o, n := countRows(t, read, "old"), countRows(t, read, "new"); o != 0 || n != 1 {
+		t.Errorf("after Purge: %d old, %d new rows; want 0 old, 1 new", o, n)
+	}
+}
+
+// TestPurge_cancelBetweenBatches cancels Purge after its first batch. The
+// batches before the cancel stay deleted, no row newer than the cutoff is
+// deleted, and a second Purge deletes the rest. The cancel can come after a
+// batch commits, so Purge may count one batch (here one row) less than it
+// deleted.
+func TestPurge_cancelBetweenBatches(t *testing.T) {
+	write, read := openTestPools(t)
+	const old, keep = 1000, 5
+	insertRows(t, write, old, "2026-01-01T00:00:00.000Z", "old")
+	insertRows(t, write, keep, "", "new")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := startPurge(t, ctx, write, read, old)
+
+	cancel()
+	r := <-done
+	if r.err == nil {
+		t.Fatalf("cancelled Purge = (%d, nil), want an error", r.n)
+	}
+	if r.n < 1 || r.n >= old {
+		t.Errorf("cancelled Purge deleted %d rows, want between 1 and %d", r.n, old-1)
+	}
+	left := countRows(t, read, "old")
+	if deleted := old - left; deleted != int(r.n) && deleted != int(r.n)+1 {
+		t.Errorf("after cancel: %d old rows deleted, Purge counted %d; want %d or %d", deleted, r.n, r.n, r.n+1)
+	}
+	if n := countRows(t, read, "new"); n != keep {
+		t.Errorf("after cancel: %d new rows, want %d", n, keep)
+	}
+
+	rest, err := Purge(context.Background(), write, time.Hour)
+	if err != nil || rest != int64(left) {
+		t.Errorf("second Purge = (%d, %v), want (%d, nil)", rest, err, left)
+	}
+	if o, n := countRows(t, read, "old"), countRows(t, read, "new"); o != 0 || n != keep {
+		t.Errorf("after second Purge: %d old, %d new rows; want 0 old, %d new", o, n, keep)
+	}
+}
+
+// TestMigrate_afterCancel cancels Migrate on a database with the schema
+// before F-100, at several points of the index build. A second Migrate
+// finishes, every index exists, and no row is lost.
+func TestMigrate_afterCancel(t *testing.T) {
+	indexes := []string{
+		"logs_log_time_idx", "logs_ingested_at_idx", "logs_source_idx",
+		"logs_level_idx", "logs_time_idx", "logs_source_level_idx",
+	}
+	const rows = 10000
+	for _, after := range []time.Duration{0, time.Millisecond, 5 * time.Millisecond} {
+		t.Run(after.String(), func(t *testing.T) {
+			sqlDB, err := Open(filepath.Join(t.TempDir(), "logr.db"))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer sqlDB.Close()
+			if _, err := sqlDB.ExecContext(context.Background(), preF100DDL); err != nil {
+				t.Fatalf("old schema: %v", err)
+			}
+			insertRows(t, sqlDB, rows, "", "m")
+
+			ctx, cancel := context.WithTimeout(context.Background(), after)
+			_ = Migrate(ctx, sqlDB) // may fail or finish, by when the cancel comes
+			cancel()
+
+			if err := Migrate(context.Background(), sqlDB); err != nil {
+				t.Fatalf("second Migrate: %v", err)
+			}
+			for _, name := range indexes {
+				var n int
+				if err := sqlDB.QueryRowContext(context.Background(),
+					`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				if n != 1 {
+					t.Errorf("index %s missing after the second Migrate", name)
+				}
+			}
+			if got := countRows(t, sqlDB, "m"); got != rows {
+				t.Errorf("%d rows after Migrate, want %d", got, rows)
+			}
+		})
 	}
 }
 
