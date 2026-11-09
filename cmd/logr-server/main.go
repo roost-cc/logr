@@ -51,7 +51,9 @@ Flags:
                    $XDG_CONFIG_HOME/logr/<name>.toml
                    (default: ~/.config/logr/server.toml)
   -init            Write a default server.toml and exit
-  -migrate         Apply the database schema and exit
+  -migrate         Apply the database schema and exit. It builds missing
+                   indexes, which can take minutes on a large database;
+                   run it before the first start after an upgrade
 
 Config keys (server.toml):
   db            = path to SQLite database file
@@ -105,6 +107,7 @@ Config keys (server.toml):
 	}
 	defer sqlDB.Close()
 
+	log.Printf("server: applying schema")
 	if err := db.Migrate(ctx, sqlDB); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
@@ -112,6 +115,12 @@ Config keys (server.toml):
 		fmt.Println("Schema applied.")
 		return
 	}
+
+	readDB, err := db.OpenRead(cfg.DB)
+	if err != nil {
+		log.Fatalf("open read pool: %v", err)
+	}
+	defer readDB.Close()
 
 	retention, err := time.ParseDuration(cfg.Retention)
 	if err != nil {
@@ -170,7 +179,7 @@ Config keys (server.toml):
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		queryLoop(ctx, queryLn, sqlDB)
+		queryLoop(ctx, queryLn, readDB)
 	}()
 	go func() { <-ctx.Done(); queryLn.Close() }()
 
@@ -247,13 +256,13 @@ func runRetention(ctx context.Context, sqlDB *sql.DB, retention time.Duration) {
 	purge := func() {
 		n, err := db.Purge(ctx, sqlDB, retention)
 		if err != nil && ctx.Err() == nil {
-			log.Printf("retention: %v", err)
+			log.Printf("retention: purged %d rows, then: %v", n, err)
 		} else if n > 0 {
 			log.Printf("retention: purged %d rows older than %v", n, retention)
 		}
 	}
 	purge()
-	tick := time.NewTicker(24 * time.Hour)
+	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
 	for {
 		select {

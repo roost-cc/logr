@@ -40,19 +40,41 @@ CREATE TABLE IF NOT EXISTS logs (
 	message     TEXT    NOT NULL,
 	data        TEXT    NOT NULL DEFAULT '{}'
 );
-CREATE INDEX IF NOT EXISTS logs_log_time_idx    ON logs (log_time DESC);
-CREATE INDEX IF NOT EXISTS logs_ingested_at_idx ON logs (ingested_at DESC);
-CREATE INDEX IF NOT EXISTS logs_source_idx      ON logs (source);
-CREATE INDEX IF NOT EXISTS logs_level_idx       ON logs (level);
+CREATE INDEX IF NOT EXISTS logs_log_time_idx     ON logs (log_time DESC);
+CREATE INDEX IF NOT EXISTS logs_ingested_at_idx  ON logs (ingested_at DESC);
+CREATE INDEX IF NOT EXISTS logs_source_idx       ON logs (source);
+CREATE INDEX IF NOT EXISTS logs_level_idx        ON logs (level);
+CREATE INDEX IF NOT EXISTS logs_time_idx         ON logs (` + timeSortSQL + `);
+CREATE INDEX IF NOT EXISTS logs_source_level_idx ON logs (source, level);
 `
 
+// dsnParams are the connection parameters that Open and OpenRead share.
+const dsnParams = "?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1"
+
 // Open opens (or creates) a SQLite database at path with WAL mode enabled.
+// It is the single write connection: Migrate, the ingest flush and Purge use it.
 func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=1")
+	db, err := sql.Open("sqlite", path+dsnParams)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // SQLite supports one writer at a time
+	return db, nil
+}
+
+// readConns is the most connections the read pool opens. More queries wait
+// in line, so the queries use at most this many cores at once.
+const readConns = 4
+
+// OpenRead opens a pool of read-only connections to the database at path.
+// In WAL mode its reads run while the write connection from Open writes, so
+// a long query does not hold up ingest (F-100 D4).
+func OpenRead(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path+dsnParams+"&_pragma=query_only(1)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(readConns)
 	return db, nil
 }
 

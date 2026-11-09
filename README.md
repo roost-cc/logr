@@ -30,7 +30,7 @@ Three binaries share one Go module. They communicate over newline-delimited JSON
                                                    logr-view (TUI)
 ```
 
-- **`logr-server`** — long-running daemon. Owns the SQLite file. Listens on an _ingest socket_ (accepts records from any number of `logr-in` processes, batched through a 2-second flush ticker) and a _query socket_ (one request per connection, response stream terminated by a `done` or `error` frame). Also runs retention purge at startup and every 24 hours.
+- **`logr-server`** — long-running daemon. Owns the SQLite file. Listens on an _ingest socket_ (accepts records from any number of `logr-in` processes, batched through a 2-second flush ticker) and a _query socket_ (one request per connection, response stream terminated by a `done` or `error` frame). Also runs retention purge at startup and every hour. Queries read from their own read-only connection pool, so a long query does not hold up ingest.
 - **`logr-in`** — a forwarder. Selects one _connector_ (`stdin`, `docker`, or `cdp`), pipes raw lines through a parser, and writes records to the server's ingest socket. Buffers up to 2000 records and auto-reconnects.
 - **`logr-view`** — interactive TUI (Bubble Tea + Catppuccin Mocha) for filtering, tailing, marking, and exporting log records. Persists filter and column state to `client.toml` on clean exit.
 
@@ -155,6 +155,8 @@ Running `bin/logr-server` directly in a terminal still works for debugging.
 | `-c <ref>` | Config file (bare name or path)        |
 | `-init`    | Write a default `server.toml` and exit |
 | `-migrate` | Apply the database schema and exit     |
+
+After an upgrade that adds indexes, stop the service, run `logr-server -migrate`, then start the service. On a full database the index build can take minutes, and `logr-server` opens its sockets only after it.
 
 ## Running `logr-in` (the forwarder)
 
@@ -395,7 +397,7 @@ Levels are normalised: `warning` → `WARN`, `critical`/`err`/`fatal`/`panic` �
 
 ## Retention
 
-`logr-server` deletes records older than the `retention` value in `server.toml` (default `168h` = 7 days), once at startup and then every 24 hours.
+`logr-server` deletes records older than the `retention` value in `server.toml` (default `168h` = 7 days), once at startup and then every hour. It deletes at most 10,000 rows per transaction, so an ingest flush does not wait for the whole delete.
 
 ```toml
 # server.toml
@@ -415,10 +417,12 @@ CREATE TABLE logs (
     data        TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX logs_log_time_idx    ON logs (log_time DESC);
-CREATE INDEX logs_ingested_at_idx ON logs (ingested_at DESC);
-CREATE INDEX logs_source_idx      ON logs (source);
-CREATE INDEX logs_level_idx       ON logs (level);
+CREATE INDEX logs_log_time_idx     ON logs (log_time DESC);
+CREATE INDEX logs_ingested_at_idx  ON logs (ingested_at DESC);
+CREATE INDEX logs_source_idx       ON logs (source);
+CREATE INDEX logs_level_idx        ON logs (level);
+CREATE INDEX logs_time_idx         ON logs (COALESCE(log_time, ingested_at));
+CREATE INDEX logs_source_level_idx ON logs (source, level);
 ```
 
 You can query the database directly for ad-hoc analysis:
