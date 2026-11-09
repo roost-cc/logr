@@ -497,8 +497,8 @@ func TestPurge_cancelBetweenBatches(t *testing.T) {
 }
 
 // TestMigrate_afterCancel cancels Migrate on a database with the schema
-// before F-100, at several points of the index build. A second Migrate
-// finishes, every index exists, and no row is lost.
+// before F-100, with a context that expires after 0, 1 or 5 ms. It checks
+// that a second Migrate after the cancel finishes with every index and row.
 func TestMigrate_afterCancel(t *testing.T) {
 	indexes := []string{
 		"logs_log_time_idx", "logs_ingested_at_idx", "logs_source_idx",
