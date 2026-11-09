@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -122,6 +123,115 @@ func TestStats_noneMergesBeforeLimit(t *testing.T) {
 				t.Errorf("%s: more than one (none) group: %v", tc.name, got)
 			}
 		}
+	}
+}
+
+// TestStats_manyGroupsBounded checks, for every stats count, that one call
+// holds at most aggLimit groups plus the '(none)' group, with 2,000 more
+// groups than that in the data, and that it returns the largest aggLimit
+// groups of the old GROUP BY COALESCE(…, '(none)') query.
+func TestStats_manyGroupsBounded(t *testing.T) {
+	sqlDB := openTestDB(t)
+	ctx := context.Background()
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(source string, level any, n int) {
+		for i := 0; i < n; i++ {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO logs (source, level, message) VALUES (?, ?, 'm')`, source, level); err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+		}
+	}
+	// 'aaa' sorts before 'api': its '(none)' parts must not add to those of 'api'.
+	insert("aaa", nil, 1)
+	insert("aaa", "(none)", 1)
+	for i := 0; i < 25; i++ {
+		insert("api", fmt.Sprintf("B%02d", i), 30+2*i)
+	}
+	insert("api", nil, 20)
+	insert("api", "(none)", 21)
+	for i := 0; i < 2000; i++ {
+		insert(fmt.Sprintf("s%04d", i), fmt.Sprintf("S%04d", i), 1)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		count func(context.Context, *sql.DB, AggOpts) ([]AggRow, error)
+		old   string
+	}{
+		{"CountBySource", CountBySource, `SELECT COALESCE(source, '(none)'), '', count(*) FROM logs GROUP BY 1`},
+		{"CountByLevel", CountByLevel, `SELECT COALESCE(level, '(none)'), '', count(*) FROM logs GROUP BY 1`},
+		{"CountBySourceLevel", CountBySourceLevel,
+			`SELECT COALESCE(source, '(none)'), COALESCE(level, '(none)'), count(*) FROM logs GROUP BY 1, 2`},
+	} {
+		held := 0
+		aggHeldHook = func(n int) { held = max(held, n) }
+		got, err := tc.count(ctx, sqlDB, AggOpts{})
+		aggHeldHook = nil
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if held > aggLimit+1 {
+			t.Errorf("%s held %d groups, want at most %d", tc.name, held, aggLimit+1)
+		}
+		assertTopGroups(t, tc.name, got, oldGroups(t, sqlDB, tc.old))
+	}
+}
+
+// oldGroups runs q, which returns key, key2 and count, and returns the counts by keys.
+func oldGroups(t *testing.T, sqlDB *sql.DB, q string) map[[2]string]int64 {
+	t.Helper()
+	rows, err := sqlDB.Query(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	all := map[[2]string]int64{}
+	for rows.Next() {
+		var k [2]string
+		var n int64
+		if err := rows.Scan(&k[0], &k[1], &n); err != nil {
+			t.Fatal(err)
+		}
+		all[k] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return all
+}
+
+// assertTopGroups checks that got holds the aggLimit largest groups of all,
+// largest first. Groups with the same count as the last one kept may change
+// places, so it compares the counts and checks each group's count in all.
+func assertTopGroups(t *testing.T, name string, got []AggRow, all map[[2]string]int64) {
+	t.Helper()
+	var counts []int64
+	for _, n := range all {
+		counts = append(counts, n)
+	}
+	sort.Slice(counts, func(i, j int) bool { return counts[i] > counts[j] })
+	if len(counts) > aggLimit {
+		counts = counts[:aggLimit]
+	}
+	var gotCounts []int64
+	seen := map[[2]string]bool{}
+	for _, r := range got {
+		k := [2]string{r.Key, r.Key2}
+		if seen[k] || all[k] != r.Count {
+			t.Errorf("%s: row %v is repeated or has the wrong count (want %d)", name, r, all[k])
+		}
+		seen[k] = true
+		gotCounts = append(gotCounts, r.Count)
+	}
+	if !reflect.DeepEqual(gotCounts, counts) {
+		t.Errorf("%s counts = %v, want %v", name, gotCounts, counts)
 	}
 }
 
