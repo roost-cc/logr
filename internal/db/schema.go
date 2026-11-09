@@ -62,11 +62,20 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// readConns is the most connections the read pool opens. More queries wait
+// in line, so the queries use at most this many cores at once.
+const readConns = 4
+
 // OpenRead opens a pool of read-only connections to the database at path.
 // In WAL mode its reads run while the write connection from Open writes, so
 // a long query does not hold up ingest (F-100 D4).
 func OpenRead(path string) (*sql.DB, error) {
-	return sql.Open("sqlite", path+dsnParams+"&_pragma=query_only(1)")
+	db, err := sql.Open("sqlite", path+dsnParams+"&_pragma=query_only(1)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(readConns)
+	return db, nil
 }
 
 // Migrate applies the schema to the database. Safe to call on an existing DB.

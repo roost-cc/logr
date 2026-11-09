@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,6 +29,56 @@ func TestOpenRead_rejectsWrites(t *testing.T) {
 	if _, err := read.ExecContext(context.Background(),
 		`INSERT INTO logs (source, message) VALUES ('api', 'm')`); err == nil {
 		t.Fatal("INSERT through the read pool succeeded, want an error")
+	}
+}
+
+// TestOpenRead_poolLimit runs more readers at once than each pool allows, on
+// the read pool and on the write connection. No reader fails, and no pool
+// opens more connections than its limit.
+func TestOpenRead_poolLimit(t *testing.T) {
+	write, read := openTestPools(t)
+	ctx := context.Background()
+	if _, err := write.ExecContext(ctx, `INSERT INTO logs (source, level, message) VALUES
+		('api', 'info', 'm'), ('web', NULL, 'm')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		pool  *sql.DB
+		limit int
+	}{
+		{"read pool", read, readConns},
+		{"write connection", write, 1},
+	} {
+		if got := tc.pool.Stats().MaxOpenConnections; got != tc.limit {
+			t.Errorf("%s: MaxOpenConnections = %d, want %d", tc.name, got, tc.limit)
+		}
+		const readers = 20
+		var wg sync.WaitGroup
+		errs := make(chan error, readers)
+		open := make(chan int, readers)
+		for i := 0; i < readers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, err := CountBySourceLevel(ctx, tc.pool, AggOpts{})
+				errs <- err
+				open <- tc.pool.Stats().OpenConnections
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		close(open)
+		for err := range errs {
+			if err != nil {
+				t.Errorf("%s: reader failed: %v", tc.name, err)
+			}
+		}
+		for n := range open {
+			if n > tc.limit {
+				t.Errorf("%s: %d connections open, want at most %d", tc.name, n, tc.limit)
+			}
+		}
 	}
 }
 
