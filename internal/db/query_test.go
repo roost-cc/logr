@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/roost-cc/logr/internal/filter"
 )
@@ -14,7 +15,13 @@ import (
 // openTestDB opens a migrated database in a temporary file.
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	sqlDB, err := Open(filepath.Join(t.TempDir(), "logr.db"))
+	return openTestDBAt(t, filepath.Join(t.TempDir(), "logr.db"))
+}
+
+// openTestDBAt opens and migrates the database at path with Open.
+func openTestDBAt(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	sqlDB, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -283,6 +290,56 @@ func TestSources_plan(t *testing.T) {
 		t.Errorf("plan has no SEARCH on logs_source_idx:\n%s", plan)
 	}
 	if strings.Contains(plan, "SCAN logs") {
+		t.Errorf("plan scans logs:\n%s", plan)
+	}
+}
+
+// TestPurge_batches checks that Purge deletes old rows in more than one batch
+// until none is left, and keeps every row newer than the cutoff (F-100 D5).
+func TestPurge_batches(t *testing.T) {
+	old := purgeBatch
+	purgeBatch = 3
+	t.Cleanup(func() { purgeBatch = old })
+
+	sqlDB := openTestDB(t)
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO logs (ingested_at, source, message) VALUES ('2026-01-01T00:00:00.000Z', 'api', 'old')`); err != nil {
+			t.Fatalf("insert old: %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO logs (source, message) VALUES ('api', 'new')`); err != nil {
+			t.Fatalf("insert new: %v", err)
+		}
+	}
+	n, err := Purge(ctx, sqlDB, time.Hour)
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if n != 10 {
+		t.Errorf("Purge deleted %d rows, want 10", n)
+	}
+	var kept int
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM logs WHERE message = 'new'`).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if total, err := TotalCount(ctx, sqlDB, AggOpts{}); err != nil || total != 2 || kept != 2 {
+		t.Errorf("after Purge: %d rows (%d new), %v; want 2 new rows", total, kept, err)
+	}
+}
+
+// TestPurge_plan checks that a purge batch seeks logs_ingested_at_idx and
+// never scans the whole logs table (F-100 D5).
+func TestPurge_plan(t *testing.T) {
+	plan := queryPlan(t, openTestDB(t), purgeSQL, "2026-01-01T00:00:00Z", purgeBatch)
+	if !strings.Contains(plan, "logs_ingested_at_idx (ingested_at<?)") {
+		t.Errorf("plan does not seek logs_ingested_at_idx:\n%s", plan)
+	}
+	if hasFullScan(plan) {
 		t.Errorf("plan scans logs:\n%s", plan)
 	}
 }

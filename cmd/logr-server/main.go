@@ -113,6 +113,12 @@ Config keys (server.toml):
 		return
 	}
 
+	readDB, err := db.OpenRead(cfg.DB)
+	if err != nil {
+		log.Fatalf("open read pool: %v", err)
+	}
+	defer readDB.Close()
+
 	retention, err := time.ParseDuration(cfg.Retention)
 	if err != nil {
 		log.Printf("bad retention %q, defaulting to 168h: %v", cfg.Retention, err)
@@ -170,7 +176,7 @@ Config keys (server.toml):
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		queryLoop(ctx, queryLn, sqlDB)
+		queryLoop(ctx, queryLn, readDB)
 	}()
 	go func() { <-ctx.Done(); queryLn.Close() }()
 
@@ -253,7 +259,7 @@ func runRetention(ctx context.Context, sqlDB *sql.DB, retention time.Duration) {
 		}
 	}
 	purge()
-	tick := time.NewTicker(24 * time.Hour)
+	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
 	for {
 		select {

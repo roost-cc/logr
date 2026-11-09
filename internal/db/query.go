@@ -152,14 +152,34 @@ func MaxID(ctx context.Context, db *sql.DB) (int64, error) {
 	return id, err
 }
 
-// Purge deletes logs older than the given duration.
+// purgeBatch is the most rows Purge deletes in one transaction (F-100 D5).
+// A variable so that a test can make it small.
+var purgeBatch = 10000
+
+// purgeSQL deletes one batch of rows ingested before the cutoff. The subquery
+// seeks logs_ingested_at_idx.
+const purgeSQL = `DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE ingested_at < ? LIMIT ?)`
+
+// Purge deletes logs older than the given duration, purgeBatch rows per
+// transaction, and returns how many it deleted. Between batches the write
+// connection is free, so an ingest flush does not wait for the whole delete.
 func Purge(ctx context.Context, db *sql.DB, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan).UTC().Format(time.RFC3339Nano)
-	res, err := db.ExecContext(ctx, `DELETE FROM logs WHERE ingested_at < ?`, cutoff)
-	if err != nil {
-		return 0, err
+	var total int64
+	for {
+		res, err := db.ExecContext(ctx, purgeSQL, cutoff, purgeBatch)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < int64(purgeBatch) {
+			return total, nil
+		}
 	}
-	return res.RowsAffected()
 }
 
 // sourcesSQL lists the distinct sources with a loose index scan: it seeks
