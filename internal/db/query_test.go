@@ -147,24 +147,19 @@ func queryShapes(t *testing.T) []queryShape {
 			}
 			where, fargs = r.SQL, r.Args
 		}
-		opts := []struct {
+		type namedOpts struct {
 			name string
 			opts QueryOpts
-		}{
+		}
+		opts := []namedOpts{
 			{"newest", QueryOpts{}},
 			{"tail", QueryOpts{After: 100}},
 			{"page", QueryOpts{Before: 100}},
 		}
 		for _, col := range []string{"log_time", "ingested_at", "source", "level", "message", "data.path"} {
 			opts = append(opts,
-				struct {
-					name string
-					opts QueryOpts
-				}{"sort " + col + " ASC", QueryOpts{SortCol: col}},
-				struct {
-					name string
-					opts QueryOpts
-				}{"sort " + col + " DESC", QueryOpts{SortCol: col, SortDesc: true}},
+				namedOpts{"sort " + col + " ASC", QueryOpts{SortCol: col}},
+				namedOpts{"sort " + col + " DESC", QueryOpts{SortCol: col, SortDesc: true}},
 			)
 		}
 		for _, o := range opts {
