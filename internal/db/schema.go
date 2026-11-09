@@ -44,6 +44,8 @@ CREATE INDEX IF NOT EXISTS logs_log_time_idx    ON logs (log_time DESC);
 CREATE INDEX IF NOT EXISTS logs_ingested_at_idx ON logs (ingested_at DESC);
 CREATE INDEX IF NOT EXISTS logs_source_idx      ON logs (source);
 CREATE INDEX IF NOT EXISTS logs_level_idx       ON logs (level);
+CREATE INDEX IF NOT EXISTS logs_time_idx         ON logs (` + timeSortSQL + `);
+CREATE INDEX IF NOT EXISTS logs_source_level_idx ON logs (source, level);
 `
 
 // Open opens (or creates) a SQLite database at path with WAL mode enabled.

@@ -33,45 +33,7 @@ type QueryOpts struct {
 
 // Query returns rows matching opts, ordered newest first (or oldest first for tail).
 func Query(ctx context.Context, db *sql.DB, opts QueryOpts) ([]Row, error) {
-	where := "1"
-	args := append([]any{}, opts.Args...)
-
-	if opts.Where != "" {
-		where = opts.Where
-	}
-
-	var orderExpr string
-	if opts.After > 0 {
-		where = fmt.Sprintf("(%s) AND id > ?", where)
-		args = append(args, opts.After)
-		orderExpr = "id ASC"
-	} else if opts.Before > 0 {
-		where = fmt.Sprintf("(%s) AND id < ?", where)
-		args = append(args, opts.Before)
-		orderExpr = "id DESC"
-	} else if opts.SortCol != "" {
-		dir := "ASC"
-		if opts.SortDesc {
-			dir = "DESC"
-		}
-		orderExpr = sortColSQL(opts.SortCol) + " " + dir
-	} else {
-		orderExpr = "id DESC"
-	}
-
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = 200
-	}
-
-	q := fmt.Sprintf(`
-		SELECT id, ingested_at, log_time, source, level, message, data
-		FROM logs
-		WHERE %s
-		ORDER BY %s
-		LIMIT ?`, where, orderExpr)
-	args = append(args, limit)
-
+	q, args := querySQL(opts)
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
@@ -117,12 +79,59 @@ func Query(ctx context.Context, db *sql.DB, opts QueryOpts) ([]Row, error) {
 	return result, nil
 }
 
-// MaxID returns the current maximum log id.
+// querySQL builds the SELECT that Query runs, and its arguments. The plan
+// tests read its plan.
+func querySQL(opts QueryOpts) (string, []any) {
+	where := "1"
+	args := append([]any{}, opts.Args...)
+
+	if opts.Where != "" {
+		where = opts.Where
+	}
+
+	var orderExpr string
+	if opts.After > 0 {
+		where = fmt.Sprintf("(%s) AND id > ?", where)
+		args = append(args, opts.After)
+		orderExpr = "id ASC"
+	} else if opts.Before > 0 {
+		where = fmt.Sprintf("(%s) AND id < ?", where)
+		args = append(args, opts.Before)
+		orderExpr = "id DESC"
+	} else if opts.SortCol != "" {
+		dir := "ASC"
+		if opts.SortDesc {
+			dir = "DESC"
+		}
+		orderExpr = sortColSQL(opts.SortCol) + " " + dir
+	} else {
+		orderExpr = "id DESC"
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+
+	q := fmt.Sprintf(`
+		SELECT id, ingested_at, log_time, source, level, message, data
+		FROM logs
+		WHERE %s
+		ORDER BY %s
+		LIMIT ?`, where, orderExpr)
+	return q, append(args, limit)
+}
+
+// timeSortSQL is the expression a sort on log_time orders by: a row with no
+// log_time falls back to ingested_at. logs_time_idx indexes the same text,
+// because SQLite uses an expression index only for an identical expression.
+const timeSortSQL = "COALESCE(log_time, ingested_at)"
+
 // sortColSQL maps a column key to a safe SQL ORDER BY expression.
 func sortColSQL(col string) string {
 	switch col {
 	case "log_time":
-		return "COALESCE(log_time, ingested_at)"
+		return timeSortSQL
 	case "ingested_at":
 		return "ingested_at"
 	case "source", "level", "message":
@@ -136,6 +145,7 @@ func sortColSQL(col string) string {
 	}
 }
 
+// MaxID returns the current maximum log id.
 func MaxID(ctx context.Context, db *sql.DB) (int64, error) {
 	var id int64
 	err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM logs`).Scan(&id)
