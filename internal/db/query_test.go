@@ -51,6 +51,28 @@ func TestSources_sorted(t *testing.T) {
 	}
 }
 
+// TestSources_edgeValues checks that the loose index scan keeps an empty
+// source and sources that differ only in case, in the same order as the old
+// SELECT DISTINCT source ORDER BY source.
+func TestSources_edgeValues(t *testing.T) {
+	sqlDB := openTestDB(t)
+	ctx := context.Background()
+	for _, src := range []string{"web", "", "Web", "api", ""} {
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO logs (source, message) VALUES (?, 'm')`, src); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	got, err := Sources(ctx, sqlDB)
+	if err != nil {
+		t.Fatalf("Sources: %v", err)
+	}
+	want := []string{"", "Web", "api", "web"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Sources = %q, want %q", got, want)
+	}
+}
+
 func TestSources_empty(t *testing.T) {
 	got, err := Sources(context.Background(), openTestDB(t))
 	if err != nil {
